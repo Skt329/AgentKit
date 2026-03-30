@@ -18,14 +18,9 @@ export default function DocumentUpload({ onUploaded }: Props) {
   async function processFile(file: File) {
     if (resetTimerRef.current) clearTimeout(resetTimerRef.current);
 
-<<<<<<< HEAD
-    const allowedTypes = ["application/pdf", "text/markdown", "text/x-markdown"];
-    if (!allowedTypes.includes(file.type) && !file.name.endsWith(".md")) {
-=======
     // Only PDFs are supported — the upstream flow does not handle Markdown.
     const allowedTypes = ["application/pdf"];
     if (!allowedTypes.includes(file.type) && !file.name.toLowerCase().endsWith(".pdf")) {
->>>>>>> feat/pageindex-notebooklm
       setStatus("error");
       setMessage("Only PDF files are supported.");
       // Schedule reset so the picker can be re-opened (matches success/error paths).
