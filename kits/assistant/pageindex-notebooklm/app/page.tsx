@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { listDocuments, getDocumentTree } from "@/actions/orchestrate";
 import { Document, TreeNode, RetrievedNode } from "@/lib/types";
+import { BookOpen } from "lucide-react";
 import DocumentUpload from "@/components/DocumentUpload";
 import DocumentList from "@/components/DocumentList";
 import ChatWindow from "@/components/ChatWindow";
@@ -23,6 +24,20 @@ export default function Page() {
       const result = await listDocuments();
       if (Array.isArray(result?.documents)) setDocuments(result.documents);
     } catch { /* silent */ } finally { setListLoading(false); }
+  }, []);
+
+  // One-time migration: clear localStorage chat data corrupted by the old
+  // persist-effect bug (which wrote one doc's messages into another doc's slot).
+  // Bump CHAT_STORAGE_VERSION whenever a breaking change requires a fresh wipe.
+  const CHAT_STORAGE_VERSION = "2";
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (localStorage.getItem("chat_storage_version") !== CHAT_STORAGE_VERSION) {
+      Object.keys(localStorage)
+        .filter(k => k.startsWith("chat_"))
+        .forEach(k => localStorage.removeItem(k));
+      localStorage.setItem("chat_storage_version", CHAT_STORAGE_VERSION);
+    }
   }, []);
 
   useEffect(() => { fetchDocuments(); }, [fetchDocuments]);
@@ -66,10 +81,7 @@ export default function Page() {
           flexShrink: 0,
           boxShadow: "0 0 16px rgba(45,212,191,0.3)",
         }}>
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#041a17" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/>
-            <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/>
-          </svg>
+          <BookOpen size={15} color="#041a17" strokeWidth={2.5} />
         </div>
 
         <div>
@@ -175,13 +187,9 @@ export default function Page() {
               documents={documents}
               selectedId={selectedDoc?.doc_id || null}
               onSelect={handleSelectDoc}
-              onDeleted={() => {
+              onDeleted={(deletedDocId) => {
                 fetchDocuments();
-                // If the deleted doc was selected, clear the view
-                setSelectedDoc(prev => {
-                  const stillExists = documents.some(d => d.doc_id === prev?.doc_id);
-                  return stillExists ? prev : null;
-                });
+                setSelectedDoc(prev => prev?.doc_id === deletedDocId ? null : prev);
               }}
             />
           </div>
@@ -252,6 +260,7 @@ export default function Page() {
               {/* Content — both panels stay mounted to preserve state */}
               <div style={{ flex: 1, overflow: "hidden", padding: "18px", display: activeTab === "chat" ? "block" : "none", height: "100%" }}>
                 <ChatWindow
+                  key={selectedDoc.doc_id}
                   docId={selectedDoc.doc_id}
                   docName={selectedDoc.file_name}
                   onRetrievedNodes={handleRetrievedNodes}
@@ -291,10 +300,7 @@ export default function Page() {
                   display: "flex", alignItems: "center", justifyContent: "center",
                   boxShadow: "var(--shadow-md)",
                 }}>
-                  <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="var(--text-3)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/>
-                    <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/>
-                  </svg>
+                  <BookOpen size={32} color="var(--text-3)" strokeWidth={1.5} />
                 </div>
 
                 <p style={{ margin: "0 0 10px", fontSize: "22px", fontWeight: 600, color: "var(--text-1)", letterSpacing: "-0.03em" }}>
