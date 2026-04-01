@@ -13,31 +13,42 @@ interface Props {
 /** Build a lookup map and resolve the flat API list into a nested tree.
  *  Root nodes are those whose node_id appears in the first item's `nodes`
  *  list OR nodes that are not referenced as children by any other node.
+ *  Tolerates LLM hallucinations by gracefully ignoring duplicate IDs, missing references, DAGs, and cycles.
  */
 function buildTree(flat: TreeNode[]): TreeNodeResolved[] {
   const map = new Map<string, TreeNodeResolved>();
 
   // First pass: create resolved nodes with empty children arrays
   for (const n of flat) {
+    if (map.has(n.node_id)) {
+      console.warn(`buildTree: Duplicate node_id detected: "${n.node_id}". Skipping.`);
+      continue;
+    }
     map.set(n.node_id, { ...n, nodes: [] });
   }
 
   // Second pass: populate children
-  const childIds = new Set<string>();
+  const parentMap = new Map<string, string>();
   for (const n of flat) {
-    const resolved = map.get(n.node_id)!;
+    const resolved = map.get(n.node_id);
+    if (!resolved) continue;
+
     for (const childId of n.nodes) {
       const child = map.get(childId);
-      if (child) {
-        resolved.nodes.push(child);
-        childIds.add(childId);
+      if (!child) {
+        console.warn(`buildTree: Missing reference for childId "${childId}" requested by parent "${n.node_id}". Skipping.`);
+        continue;
       }
+      if (parentMap.has(childId)) {
+        console.warn(`buildTree: Shared child detected. Child "${childId}" is claimed by multiple parents. Skipping.`);
+        continue;
+      }
+      parentMap.set(childId, n.node_id);
+      resolved.nodes.push(child);
     }
   }
 
   // ── Cycle detection ─────────────────────────────────────────────
-  // Run a DFS tracking visiting/visited state. A back-edge to a node
-  // currently in the visiting set means we found a cycle.
   type VisitState = "unvisited" | "visiting" | "visited";
   const state = new Map<string, VisitState>();
   map.forEach((_, id) => state.set(id, "unvisited"));
@@ -45,15 +56,19 @@ function buildTree(flat: TreeNode[]): TreeNodeResolved[] {
   function dfs(nodeId: string): void {
     state.set(nodeId, "visiting");
     const node = map.get(nodeId)!;
+    
+    const validChildren = [];
     for (const child of node.nodes) {
       const childState = state.get(child.node_id);
       if (childState === "visiting") {
-        throw new Error(
-          `buildTree: cycle detected — node "${child.node_id}" is its own ancestor.`
-        );
+        console.warn(`buildTree: cycle detected — node "${child.node_id}" is its own ancestor. Skipping back-edge.`);
+        continue;
       }
+      validChildren.push(child);
       if (childState === "unvisited") dfs(child.node_id);
     }
+    node.nodes = validChildren;
+    
     state.set(nodeId, "visited");
   }
 
@@ -63,9 +78,7 @@ function buildTree(flat: TreeNode[]): TreeNodeResolved[] {
   // ── End cycle detection ─────────────────────────────────────────
 
   // Roots = nodes not referenced as a child
-  return flat
-    .map(n => map.get(n.node_id)!)
-    .filter(n => !childIds.has(n.node_id));
+  return Array.from(map.values()).filter(n => !parentMap.has(n.node_id));
 }
 
 function TreeNodeRow({
@@ -87,105 +100,168 @@ function TreeNodeRow({
 
   return (
     <div style={{ animation: "float-in 0.25s var(--ease) both" }}>
-      {/* Semantic button wrapper — enables keyboard toggle and exposes state */}
-      <button
-        type="button"
-        onClick={() => hasChildren && setOpen(o => !o)}
-        aria-expanded={hasChildren ? open : undefined}
-        onKeyDown={(e) => {
-          if (!hasChildren) return;
-          if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault();
-            setOpen(o => !o);
-          }
-        }}
-        onFocus={(e) => { if (!isHighlighted) (e.currentTarget.firstElementChild as HTMLElement).style.background = "var(--surface-2)"; }}
-        onBlur={(e) => { if (!isHighlighted) (e.currentTarget.firstElementChild as HTMLElement).style.background = "transparent"; }}
-        style={{
-          width: "100%",
-          textAlign: "left",
-          background: "none",
-          border: "none",
-          padding: 0,
-          cursor: hasChildren ? "pointer" : "default",
-        }}
-      >
-      <div
-        style={{
-          display: "flex", alignItems: "flex-start", gap: "8px",
-          padding: `7px 10px 7px ${10 + depth * 16}px`,
-          borderRadius: "var(--radius-md)",
-          background: isHighlighted ? "var(--amber-dim)" : "transparent",
-          border: `1px solid ${isHighlighted ? "rgba(246,201,14,0.25)" : "transparent"}`,
-          transition: "all 0.18s var(--ease)",
-          marginBottom: "2px",
-          boxShadow: isHighlighted ? "0 0 12px rgba(246,201,14,0.08)" : "none",
-        }}
-        onMouseEnter={e => { if (!isHighlighted) e.currentTarget.style.background = "var(--surface-2)"; }}
-        onMouseLeave={e => { if (!isHighlighted) e.currentTarget.style.background = "transparent"; }}
-      >
-        {/* Chevron / dot */}
-        <span style={{ marginTop: "3px", flexShrink: 0, width: "14px", color: isHighlighted ? "var(--amber)" : "var(--text-3)" }}>
-          {hasChildren ? (
-            <ChevronRight 
-              size={12} 
-              strokeWidth={2.5} 
-              style={{ transform: open ? "rotate(90deg)" : "rotate(0)", transition: "transform 0.2s var(--ease)", color: isHighlighted ? "var(--amber)" : "var(--text-3)" }} 
-            />
-          ) : (
-            <Circle 
-              size={5} 
-              style={{ color: isHighlighted ? "var(--amber)" : "var(--border-md)", margin: "4px 4.5px" }} 
-            />
-          )}
-        </span>
+      {hasChildren ? (
+        <button
+          type="button"
+          onClick={() => setOpen(o => !o)}
+          aria-expanded={open}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              setOpen(o => !o);
+            }
+          }}
+          onFocus={(e) => { if (!isHighlighted) (e.currentTarget.firstElementChild as HTMLElement).style.background = "var(--surface-2)"; }}
+          onBlur={(e) => { if (!isHighlighted) (e.currentTarget.firstElementChild as HTMLElement).style.background = "transparent"; }}
+          style={{
+            width: "100%",
+            textAlign: "left",
+            background: "none",
+            border: "none",
+            padding: 0,
+            cursor: "pointer",
+          }}
+        >
+          <div
+            style={{
+              display: "flex", alignItems: "flex-start", gap: "8px",
+              padding: `7px 10px 7px ${10 + depth * 16}px`,
+              borderRadius: "var(--radius-md)",
+              background: isHighlighted ? "var(--amber-dim)" : "transparent",
+              border: `1px solid ${isHighlighted ? "rgba(246,201,14,0.25)" : "transparent"}`,
+              transition: "all 0.18s var(--ease)",
+              marginBottom: "2px",
+              boxShadow: isHighlighted ? "0 0 12px rgba(246,201,14,0.08)" : "none",
+            }}
+            onMouseEnter={e => { if (!isHighlighted) e.currentTarget.style.background = "var(--surface-2)"; }}
+            onMouseLeave={e => { if (!isHighlighted) e.currentTarget.style.background = "transparent"; }}
+          >
+            {/* Chevron / dot */}
+            <span style={{ marginTop: "3px", flexShrink: 0, width: "14px", color: isHighlighted ? "var(--amber)" : "var(--text-3)" }}>
+              <ChevronRight 
+                size={12} 
+                strokeWidth={2.5} 
+                style={{ transform: open ? "rotate(90deg)" : "rotate(0)", transition: "transform 0.2s var(--ease)", color: isHighlighted ? "var(--amber)" : "var(--text-3)" }} 
+              />
+            </span>
 
-        {/* Content */}
-        <div style={{ minWidth: 0, flex: 1 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: "7px", flexWrap: "wrap" }}>
-            <span style={{
-              fontSize: "13px",
-              fontWeight: hasChildren ? 600 : 400,
-              color: isHighlighted ? "var(--amber)" : "var(--text-1)",
-              letterSpacing: "-0.01em",
-            }}>
-              {node.title}
-            </span>
-            <span style={{
-              fontFamily: "var(--font-mono)",
-              fontSize: "10px", flexShrink: 0,
-              color: isHighlighted ? "var(--amber)" : "var(--text-3)",
-              background: isHighlighted ? "var(--amber-dim)" : "var(--surface-2)",
-              border: `1px solid ${isHighlighted ? "rgba(246,201,14,0.25)" : "var(--border)"}`,
-              padding: "1px 6px", borderRadius: "4px",
-            }}>
-              {pageSpan}
-            </span>
-            {isHighlighted && (
-              <span style={{
-                fontFamily: "var(--font-mono)", fontSize: "9px", fontWeight: 600,
-                background: "var(--amber)", color: "#1a1200",
-                padding: "1px 7px", borderRadius: "20px", letterSpacing: "0.05em", textTransform: "uppercase",
-              }}>
-                retrieved
-              </span>
-            )}
+            {/* Content */}
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "7px", flexWrap: "wrap" }}>
+                <span style={{
+                  fontSize: "13px",
+                  fontWeight: 600,
+                  color: isHighlighted ? "var(--amber)" : "var(--text-1)",
+                  letterSpacing: "-0.01em",
+                }}>
+                  {node.title}
+                </span>
+                <span style={{
+                  fontFamily: "var(--font-mono)",
+                  fontSize: "10px", flexShrink: 0,
+                  color: isHighlighted ? "var(--amber)" : "var(--text-3)",
+                  background: isHighlighted ? "var(--amber-dim)" : "var(--surface-2)",
+                  border: `1px solid ${isHighlighted ? "rgba(246,201,14,0.25)" : "var(--border)"}`,
+                  padding: "1px 6px", borderRadius: "4px",
+                }}>
+                  {pageSpan}
+                </span>
+                {isHighlighted && (
+                  <span style={{
+                    fontFamily: "var(--font-mono)", fontSize: "9px", fontWeight: 600,
+                    background: "var(--amber)", color: "#1a1200",
+                    padding: "1px 7px", borderRadius: "20px", letterSpacing: "0.05em", textTransform: "uppercase",
+                  }}>
+                    retrieved
+                  </span>
+                )}
+              </div>
+              {node.summary && (
+                <p style={{
+                  margin: "3px 0 0",
+                  fontSize: "11px",
+                  color: isHighlighted ? "rgba(246,201,14,0.7)" : "var(--text-3)",
+                  lineHeight: 1.5,
+                  overflow: "hidden", display: "-webkit-box",
+                  WebkitLineClamp: 2, WebkitBoxOrient: "vertical",
+                }}>
+                  {node.summary}
+                </p>
+              )}
+            </div>
           </div>
-          {node.summary && (
-            <p style={{
-              margin: "3px 0 0",
-              fontSize: "11px",
-              color: isHighlighted ? "rgba(246,201,14,0.7)" : "var(--text-3)",
-              lineHeight: 1.5,
-              overflow: "hidden", display: "-webkit-box",
-              WebkitLineClamp: 2, WebkitBoxOrient: "vertical",
-            }}>
-              {node.summary}
-            </p>
-          )}
+        </button>
+      ) : (
+        <div style={{ width: "100%", padding: 0 }}>
+          <div
+            style={{
+              display: "flex", alignItems: "flex-start", gap: "8px",
+              padding: `7px 10px 7px ${10 + depth * 16}px`,
+              borderRadius: "var(--radius-md)",
+              background: isHighlighted ? "var(--amber-dim)" : "transparent",
+              border: `1px solid ${isHighlighted ? "rgba(246,201,14,0.25)" : "transparent"}`,
+              transition: "all 0.18s var(--ease)",
+              marginBottom: "2px",
+              boxShadow: isHighlighted ? "0 0 12px rgba(246,201,14,0.08)" : "none",
+            }}
+            onMouseEnter={e => { if (!isHighlighted) e.currentTarget.style.background = "var(--surface-2)"; }}
+            onMouseLeave={e => { if (!isHighlighted) e.currentTarget.style.background = "transparent"; }}
+          >
+            {/* Chevron / dot */}
+            <span style={{ marginTop: "3px", flexShrink: 0, width: "14px", color: isHighlighted ? "var(--amber)" : "var(--text-3)" }}>
+              <Circle 
+                size={5} 
+                style={{ color: isHighlighted ? "var(--amber)" : "var(--border-md)", margin: "4px 4.5px" }} 
+              />
+            </span>
+
+            {/* Content */}
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "7px", flexWrap: "wrap" }}>
+                <span style={{
+                  fontSize: "13px",
+                  fontWeight: 400,
+                  color: isHighlighted ? "var(--amber)" : "var(--text-1)",
+                  letterSpacing: "-0.01em",
+                }}>
+                  {node.title}
+                </span>
+                <span style={{
+                  fontFamily: "var(--font-mono)",
+                  fontSize: "10px", flexShrink: 0,
+                  color: isHighlighted ? "var(--amber)" : "var(--text-3)",
+                  background: isHighlighted ? "var(--amber-dim)" : "var(--surface-2)",
+                  border: `1px solid ${isHighlighted ? "rgba(246,201,14,0.25)" : "var(--border)"}`,
+                  padding: "1px 6px", borderRadius: "4px",
+                }}>
+                  {pageSpan}
+                </span>
+                {isHighlighted && (
+                  <span style={{
+                    fontFamily: "var(--font-mono)", fontSize: "9px", fontWeight: 600,
+                    background: "var(--amber)", color: "#1a1200",
+                    padding: "1px 7px", borderRadius: "20px", letterSpacing: "0.05em", textTransform: "uppercase",
+                  }}>
+                    retrieved
+                  </span>
+                )}
+              </div>
+              {node.summary && (
+                <p style={{
+                  margin: "3px 0 0",
+                  fontSize: "11px",
+                  color: isHighlighted ? "rgba(246,201,14,0.7)" : "var(--text-3)",
+                  lineHeight: 1.5,
+                  overflow: "hidden", display: "-webkit-box",
+                  WebkitLineClamp: 2, WebkitBoxOrient: "vertical",
+                }}>
+                  {node.summary}
+                </p>
+              )}
+            </div>
+          </div>
         </div>
-      </div>
-      </button>
+      )}
 
       {/* Children — rendered outside the toggle button */}
       {open && hasChildren && (
@@ -252,9 +328,9 @@ export default function TreeViewer({ tree, fileName, highlightedIds }: Props) {
           </p>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-          {highlightedIds.length > 0 && (
+          {highlightedIdSet.size > 0 && (
             <span className="badge badge-amber">
-              {highlightedIds.length} retrieved
+              {highlightedIdSet.size} retrieved
             </span>
           )}
           <span className="badge badge-default">
@@ -271,7 +347,7 @@ export default function TreeViewer({ tree, fileName, highlightedIds }: Props) {
       </div>
 
       {/* Retrieved footer */}
-      {highlightedIds.length > 0 && (
+      {highlightedIdSet.size > 0 && (
         <div style={{
           padding: "9px 16px",
           borderTop: "1px solid rgba(246,201,14,0.2)",
@@ -280,7 +356,7 @@ export default function TreeViewer({ tree, fileName, highlightedIds }: Props) {
         }}>
           <Search size={11} stroke="var(--amber)" strokeWidth={2.5} />
           <span style={{ fontFamily: "var(--font-mono)", fontSize: "10.5px", color: "var(--amber)", fontWeight: 500, letterSpacing: "0.04em" }}>
-            {highlightedIds.length} NODE{highlightedIds.length !== 1 ? "S" : ""} USED IN LAST ANSWER
+            {highlightedIdSet.size} NODE{highlightedIdSet.size !== 1 ? "S" : ""} USED IN LAST ANSWER
           </span>
         </div>
       )}
